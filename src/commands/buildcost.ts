@@ -17,10 +17,10 @@ export const data = new SlashCommandBuilder()
 		o.setName("end_level").setDescription("Target level (Default 40)").setMinValue(1),
 	)
 	.addBooleanOption((o) =>
-		o.setName("verbose").setDescription("Show exact values instead of short ones (Default false)"),
+		o.setName("verbose").setDescription("Show exact values instead of short ones (Default True)"),
 	)
-	.addBooleanOption((o) => 
-		o.setName("breakdown").setDescription("Show each building’s cost separately (Default false & Only works with ‘all’)"),
+	.addBooleanOption((o) =>
+		o.setName("breakdown").setDescription("Per-building costs for 'all', or per-unit cost for a building with a count (Default false)"),
 	);
 
 export async function autocomplete(interaction: Parameters<NonNullable<Command["autocomplete"]>>[0]) {
@@ -80,9 +80,8 @@ export async function execute(interaction: Parameters<Command["execute"]>[0]) {
 	const name = interaction.options.getString("building", true).toLowerCase();
 	const start = interaction.options.getInteger("start_level") ?? 0;
 	const end = interaction.options.getInteger("end_level") ?? 40;
-	const verbose = interaction.options.getBoolean("verbose") ?? false;
-	// Silently ignored for a single building
-	const breakdown = name === "all" && (interaction.options.getBoolean("breakdown") ?? false);
+	const verbose = interaction.options.getBoolean("verbose") ?? true;
+	const breakdown = interaction.options.getBoolean("breakdown") ?? false;
 
 	if (start >= end) {
 		await interaction.reply({
@@ -94,6 +93,8 @@ export async function execute(interaction: Parameters<Command["execute"]>[0]) {
 
 	let prices: Prices;
 	let count: string | null = null; // only set when querying a single building
+	let unitPrices: Prices | null = null; // single building with count > 1, breakdown on
+	let singleTip = false; // breakdown asked for a building with only one unit
 	if (name === "all") {
 		const buildings = [...defaults.buildings.values()];
 		if (!buildings.some((b) => b.countRange(start, end))) {
@@ -120,11 +121,17 @@ export async function execute(interaction: Parameters<Command["execute"]>[0]) {
 		}
 		count = countLabel(counts);
 		prices = building.getPricesInLevelRange(start, end);
+		if (breakdown && counts.max > 1) {
+			unitPrices = building.getPricesInLevelRange(start, end, true);
+		} else if (breakdown) {
+			singleTip = true;
+		}
 	}
 
 	// Exact numbers when verbose, short ones (2.30m) otherwise
 	const fmt = (n: number) => (verbose ? thousands(n) : compact(n));
 	const show = (n: number) => codeBlock(fmt(n));
+	const note = "Total Stone will vary based on your current research progress.";
 
 	const range =
 		start === 0
@@ -137,7 +144,6 @@ export async function execute(interaction: Parameters<Command["execute"]>[0]) {
 	];
 
 	const totals = new EmbedBuilder().setColor(color.primary);
-	if (count) totals.addFields({ name: "Count", value: codeBlock(count) });
 	totals.addFields(
 		{ name: "Stone", value: show(prices.stone) },
 		...Object.entries(prices.metals).flatMap(([metal, { common, uncommon }]) => [
@@ -145,11 +151,13 @@ export async function execute(interaction: Parameters<Command["execute"]>[0]) {
 			{ name: `Uncommon ${capitalize(metal)}`, value: show(uncommon) },
 		]),
 	);
+	if (count) totals.addFields({ name: "Count", value: codeBlock(count) });
+	totals.setFooter({ text: note });
 
 	const embeds = [totals];
 	let breakdownShown = false;
 
-	if (breakdown) {
+	if (breakdown && name === "all") {
 		const entries = [...defaults.buildings.values()]
 		.sort((a, b) => a.name.localeCompare(b.name))
 		.flatMap((b) => {
@@ -163,12 +171,32 @@ export async function execute(interaction: Parameters<Command["execute"]>[0]) {
 			embeds.push(new EmbedBuilder().setColor(color.primary).addFields(breakdownFields(entries, fmt)));
 			breakdownShown = true;
 		}
+	} else if (unitPrices) {
+		// count 1/1 keeps the Count row out; the totals embed above already shows it
+		embeds.push(
+			new EmbedBuilder().setColor(color.primary).addFields(
+				breakdownFields(
+					[{ name: `${name} (per unit)`, prices: unitPrices, count: { min: 1, max: 1 } }],
+					fmt,
+				),
+			),
+		);
+		breakdownShown = true;
 	}
 
-	const note = "Total Stone will vary based on your current research progress.";
 	embeds.at(-1)?.setFooter({
 		text: breakdownShown ? `Metals: common / uncommon.\n${note}` : note,
 	});
+
+	if (singleTip) {
+		embeds.push(
+			new EmbedBuilder()
+				.setColor(color.note)
+				.setDescription(
+					"**No breakdown:** this building only has one unit, so the totals above already show the cost of a single unit.",
+				),
+		);
+	}
 
 	await interaction.reply({ content: lines.join("\n"), embeds });
 }
